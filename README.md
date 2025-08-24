@@ -50,7 +50,7 @@ Currently it uses:
 
 and is trained with:
 
-* Dataset: Cosmopedia-100k (~20M tokens)
+* Dataset: Cosmopedia-100k (~105m tokens)
 * Context Window: 512 tokens
 * Batch Size: 17 (effective batch size: 136 with gradient accumulation)
 * Optimizer: AdamW with mixed precision training
