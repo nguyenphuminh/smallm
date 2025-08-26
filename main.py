@@ -196,7 +196,7 @@ class ChatBot(nn.Module):
             self.save()
             print(f"Saved to chatbot.pth (epoch {epoch + 1})")
     
-    def generate(self, prompt, context_window=512, max_length=5000, temperature=0.8, debug=False):
+    def generate(self, prompt, context_window=1024, max_length=2000, temperature=0.8, debug=False):
         print(prompt)
 
         self.eval()
