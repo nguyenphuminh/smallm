@@ -1,21 +1,23 @@
 # smallm
 
-Smallm (smaLL + LLm) is my attempt on making a tiny toy language model just for fun and educational purposes. It has about 28m parameters and is trained on the Cosmopedia-100k dataset which has roughly 105m tokens. This is very small compared to LLMs' standards, which also explains why it is kinda goofy when you use it (lol), but you can definitely train this on a mid-range card for just half a day or 1-2 days, and it still generates proper English and data that is related to the user's prompt.
+Smallm (smaLL + LLm) is my attempt on making a tiny toy language model just for fun and educational purposes. It has about 28m parameters and is trained on 300k samples of the Cosmopedia dataset which have roughly 325m tokens. This is very small compared to LLMs' standards, which also explains why it is kinda goofy when you use it (lol), but you can definitely train this on a mid-range card for just half a day or 1-2 days, and it can still generate proper English and data that should be related to the user's prompt.
 
 ## Setup
 
 Setup venv and install necessary packages:
 
 ```sh
-# Create and activate venv
+# Create and activate venv (run this every time you start)
 python -m venv venv
 source venv/bin/activate
 # or "./venv/bin/activate" if you are on windows
 
-# Install packages
+# Install packages (once)
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
 pip install tiktoken datasets
 ```
+
+Of course, you should already install compatible CUDA and Python versions, I currently use Python 3.13 and CUDA 13 (which is compatible with CUDA 12.8 mentioned above).
 
 ## Running smallm
 
@@ -34,7 +36,7 @@ Head over to `./main.py` and change `training` to `True`, then run:
 python main.py
 ```
 
-The model will train for 40 epochs (estimated 10-15 hours on my Laptop RTX 5070). You can adjust configurations in the training method.
+The model will train for 10 epochs (estimated 18-20 hours on my Laptop RTX 5070), and after each epoch it will save the current model to `./chatbot.pth`. Note that the version in the releases page is only trained for 5 epochs.
 
 To start from where you left off, just name your file `chatbot_continue.pth` to resume training.
 
@@ -50,10 +52,11 @@ Currently it uses:
 
 and is trained with:
 
-* Dataset: Cosmopedia-100k (~105M tokens)
+* Dataset: Cosmopedia (~325M tokens)
 * Context Window: 1024 tokens
 * Batch Size: 8 (effective batch size: 64 with gradient accumulation)
 * Optimizer: AdamW with mixed precision training
+* 5 epochs (about 9 hours on the laptop-version RTX 5070)
 
 and generates text with:
 
@@ -61,10 +64,10 @@ and generates text with:
 * Temperature: 0.8 (configurable)
 * Context Window: 1024 tokens
 * Stopping: Natural EOS token or conversation breaks
+* Simple repetition penalty
 
 ## Copyrights and License
 
 Copyrights © 2025 Nguyen Phu Minh.
 
 This project is licensed under the GPL 3.0 License.
-

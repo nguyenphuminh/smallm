@@ -196,13 +196,17 @@ class ChatBot(nn.Module):
             self.save()
             print(f"Saved to chatbot.pth (epoch {epoch + 1})")
     
-    def generate(self, prompt, context_window=1024, max_length=2000, temperature=0.8, debug=False):
+    def generate(self, prompt, context_window=512, max_length=5000, temperature=0.8, debug=False):
+        print(prompt)
+
         self.eval()
         
         with torch.no_grad():
             prompt_tokens = self.text_to_tokens(prompt)
             result_tokens = prompt_tokens.copy()
-            printed_length = 0
+
+            # Stack in case a char is made up of multiple tokens
+            word_stack = []
             
             if debug:
                 print(f"Prompt tokens: {prompt_tokens[:10]}...")
@@ -234,20 +238,16 @@ class ChatBot(nn.Module):
                 # Sample from top-k
                 sampled_index = torch.multinomial(top_k_probs, 1).item()
                 next_token_id = top_k_indices[sampled_index].item()
-
+                
                 result_tokens.append(next_token_id)
 
-                # Respond
-                try:
-                    current_text = self.tokens_to_text(result_tokens)
-                    if len(current_text) > printed_length:
-                        new_text = current_text[printed_length:]
-                        # Only print if new text ends with space, period, etc.
-                        if new_text and new_text[-1] in " .,!?\n":
-                            print(new_text, end="", flush=True)
-                            printed_length = len(current_text)
-                except:
-                    pass
+                # Stream output
+                word_stack.append(next_token_id)
+                decoded_word = self.tokens_to_text(word_stack)
+
+                if "\ufffd" not in decoded_word:
+                    print(decoded_word, end="")
+                    word_stack = []
                 
                 if debug and i < 10:
                     decoded = self.encoding.decode([next_token_id])
@@ -263,7 +263,7 @@ class ChatBot(nn.Module):
                 current_text = self.tokens_to_text(result_tokens)
                 if "\n\nHuman:" in current_text or "\n\nUser:" in current_text:
                     break
-        
+            
             result = self.tokens_to_text(result_tokens)
             return result
     
@@ -291,12 +291,12 @@ class ChatBot(nn.Module):
     def tokens_to_text(self, tokens):
         return self.encoding.decode(tokens)
 
-# Load cosmopedia-100k dataset
-def load_cosmopedia(max_samples=100000):
-    print("Loading cosmopedia-100k dataset...")
+# Load cosmopedia dataset
+def load_cosmopedia(max_samples=300000):
+    print("Loading cosmopedia dataset...")
     
     try:
-        dataset = load_dataset("HuggingFaceTB/cosmopedia-100k", split="train")
+        dataset = load_dataset("HuggingFaceTB/cosmopedia", "web_samples_v2", split="train")
         if max_samples:
             dataset = dataset.select(range(min(max_samples, len(dataset))))
         
