@@ -52,7 +52,7 @@ and is trained with:
 
 * Dataset: Cosmopedia-100k (~105M tokens)
 * Context Window: 1024 tokens
-* Batch Size: 17 (effective batch size: 136 with gradient accumulation)
+* Batch Size: 8 (effective batch size: 64 with gradient accumulation)
 * Optimizer: AdamW with mixed precision training
 
 and generates text with:
@@ -67,3 +67,4 @@ and generates text with:
 Copyrights © 2025 Nguyen Phu Minh.
 
 This project is licensed under the GPL 3.0 License.
+
