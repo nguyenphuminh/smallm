@@ -50,17 +50,16 @@ Currently it uses:
 
 and is trained with:
 
-* Dataset: Cosmopedia-100k (~105m tokens)
-* Context Window: 512 tokens
+* Dataset: Cosmopedia-100k (~105M tokens)
+* Context Window: 1024 tokens
 * Batch Size: 17 (effective batch size: 136 with gradient accumulation)
 * Optimizer: AdamW with mixed precision training
-* Training Time: ~10-15 hours on RTX 5070
 
 and generates text with:
 
 * Sampling: Top-k sampling (k=50)
 * Temperature: 0.8 (configurable)
-* Context Window: 512 tokens
+* Context Window: 1024 tokens
 * Stopping: Natural EOS token or conversation breaks
 
 ## Copyrights and License

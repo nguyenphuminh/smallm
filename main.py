@@ -7,6 +7,7 @@ import os
 import math
 from datasets import load_dataset
 from torch.amp import autocast, GradScaler
+import random
 
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, max_len=8192):
@@ -104,7 +105,7 @@ class ChatBot(nn.Module):
         
         return output
     
-    def train_model(self, text, epochs=40, sequence_length=512, batch_size=17, gradient_accumulation_steps=8):
+    def train_model(self, text, epochs=10, sequence_length=1024, batch_size=8, gradient_accumulation_steps=8):
         # Cap context window
         sequence_length = min(sequence_length, self.max_seq_len)
         
@@ -117,39 +118,31 @@ class ChatBot(nn.Module):
         tokens = self.text_to_tokens(text)
         print(f"Training data: {len(text)} chars -> {len(tokens)} tokens")
         
-        # Check token coverage
-        original_tokens = self.encoding.encode(text, allowed_special={"<|endoftext|>"})
-        oov_count = sum(1 for token in original_tokens if token >= self.vocab_size)
-        oov_percentage = (oov_count / len(original_tokens)) * 100
-        print(f"OOV tokens: {oov_count}/{len(original_tokens)} ({oov_percentage:.1f}%)")
+        # Pre-create all sequences 
+        sequences = []
+        for start_idx in range(0, len(tokens) - sequence_length, sequence_length // self.overlapping):
+            sequence = tokens[start_idx:start_idx + sequence_length]
+            if len(sequence) == sequence_length:
+                sequences.append(sequence)
         
-        # Create batches
-        def create_batches(tokens, seq_len, batch_size):
-            batches = []
-            for start_idx in range(0, len(tokens) - seq_len, seq_len // self.overlapping):
-                batch_tokens = tokens[start_idx:start_idx + seq_len]
-                if len(batch_tokens) == seq_len:
-                    batches.append(batch_tokens)
-                if len(batches) == batch_size:
-                    yield batches
-                    batches = []
-            if batches:
-                yield batches
+        print(f"Pre-computed {len(sequences)} sequences in memory")
         
         print(f"Training with batch_size={batch_size}, gradient_accumulation_steps={gradient_accumulation_steps}")
         print(f"Effective batch size: {batch_size * gradient_accumulation_steps}")
-        
+
+        self.train()
+
         for epoch in range(epochs):
+            # Shuffle all sequences each epoch
+            random.shuffle(sequences)
+
             total_loss = 0
             num_batches = 0
             
-            self.train()
             optimizer.zero_grad()
             
-            for batch_idx, batch_sequences in enumerate(create_batches(tokens, sequence_length, batch_size)):
-                # Pad batch if needed
-                while len(batch_sequences) < batch_size:
-                    batch_sequences.append(batch_sequences[-1])  # Repeat last sequence
+            for batch_start in range(0, len(sequences), batch_size):
+                batch_sequences = sequences[batch_start:batch_start + batch_size]
                 
                 # Convert to tensors
                 batch_input = []
@@ -178,7 +171,7 @@ class ChatBot(nn.Module):
                 num_batches += 1
                 
                 # Update weights every gradient_accumulation_steps
-                if (batch_idx + 1) % gradient_accumulation_steps == 0:
+                if num_batches % gradient_accumulation_steps == 0:
                     scaler.unscale_(optimizer)  # Unscale before clipping
                     torch.nn.utils.clip_grad_norm_(self.parameters(), 1.0)
                     scaler.step(optimizer)
@@ -203,12 +196,13 @@ class ChatBot(nn.Module):
             self.save()
             print(f"Saved to chatbot.pth (epoch {epoch + 1})")
     
-    def generate(self, prompt, context_window=512, max_length=5000, temperature=0.8, debug=False):
+    def generate(self, prompt, context_window=1024, max_length=2000, temperature=0.8, debug=False):
         self.eval()
         
         with torch.no_grad():
             prompt_tokens = self.text_to_tokens(prompt)
             result_tokens = prompt_tokens.copy()
+            printed_length = 0
             
             if debug:
                 print(f"Prompt tokens: {prompt_tokens[:10]}...")
@@ -240,8 +234,20 @@ class ChatBot(nn.Module):
                 # Sample from top-k
                 sampled_index = torch.multinomial(top_k_probs, 1).item()
                 next_token_id = top_k_indices[sampled_index].item()
-                
+
                 result_tokens.append(next_token_id)
+
+                # Respond
+                try:
+                    current_text = self.tokens_to_text(result_tokens)
+                    if len(current_text) > printed_length:
+                        new_text = current_text[printed_length:]
+                        # Only print if new text ends with space, period, etc.
+                        if new_text and new_text[-1] in " .,!?\n":
+                            print(new_text, end="", flush=True)
+                            printed_length = len(current_text)
+                except:
+                    pass
                 
                 if debug and i < 10:
                     decoded = self.encoding.decode([next_token_id])
@@ -257,7 +263,7 @@ class ChatBot(nn.Module):
                 current_text = self.tokens_to_text(result_tokens)
                 if "\n\nHuman:" in current_text or "\n\nUser:" in current_text:
                     break
-            
+        
             result = self.tokens_to_text(result_tokens)
             return result
     
@@ -320,7 +326,7 @@ def load_cosmopedia(max_samples=100000):
 
 if __name__ == "__main__":
     # Training flag for convenience
-    training = True
+    training = False
 
     # Initialize model, full vocab, ~20m params
     chatbot = ChatBot({
@@ -348,7 +354,7 @@ if __name__ == "__main__":
             chatbot.load("./chatbot_continue.pth")
 
         # Train
-        print("\nTraining transformer for 40 epochs...")
+        print("\nTraining transformer for 10 epochs...")
         chatbot.train_model(CHAT_DATA)
         print("Final save to chatbot.pth")
         chatbot.save()
@@ -363,5 +369,7 @@ if __name__ == "__main__":
 
         # Prompt
         while True:
-            prompt = input("\nPrompt: ")
-            print(chatbot.generate(f"Human: {prompt}\n\nAssistant:"))
+            prompt = input("\n\n\033[32mPrompt: ")
+            print("\033[33m")
+            chatbot.generate(f"Human: {prompt}\n\nAssistant:")
+            print("\033[0m")
