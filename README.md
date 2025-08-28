@@ -36,7 +36,7 @@ Head over to `./main.py` and change `training` to `True`, then run:
 python main.py
 ```
 
-The model will train for 10 epochs (estimated 18-20 hours on my Laptop RTX 5070), and after each epoch it will save the current model to `./chatbot.pth`. Note that the version in the releases page is only trained for 5 epochs.
+The model will train for 10 epochs (estimated 18-20 hours on my Laptop RTX 5070), and after each epoch it will save the current model to `./chatbot.pth`.
 
 To start from where you left off, just name your file `chatbot_continue.pth` to resume training.
 
@@ -56,7 +56,7 @@ and is trained with:
 * Context Window: 1024 tokens
 * Batch Size: 8 (effective batch size: 64 with gradient accumulation)
 * Optimizer: AdamW with mixed precision training
-* 5 epochs (about 9 hours on the laptop-version RTX 5070)
+* 10 epochs (about 18 hours on the laptop-version RTX 5070)
 
 and generates text with:
 
