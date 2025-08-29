@@ -47,7 +47,8 @@ Currently it uses:
 * Tokenizer: Tiktoken with GPT-2 encoding (50,257 vocab size)
 * Embedding: 256-dimensional token embeddings
 * Positional Encoding: Sinusoidal positional encoding
-* Transformer: 3 encoder layers, 8 attention heads, 256 hidden size
+* Linear input projection layer from embedding to transformer
+* Transformer: 3 encoder layers, 8 attention heads, 1024 block size, 256 d_model
 * Output: Linear layer to vocabulary
 
 and is trained with:
