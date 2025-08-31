@@ -9,8 +9,8 @@ Setup venv and install necessary packages:
 ```sh
 # Create and activate venv (run this every time you start)
 python -m venv venv
-source venv/bin/activate
-# or "./venv/bin/activate" if you are on windows
+source venv/scripts/activate
+# or "./venv/scripts/activate" if you are on windows
 
 # Install packages (once)
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
