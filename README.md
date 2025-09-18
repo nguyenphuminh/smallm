@@ -1,6 +1,6 @@
 # smallm
 
-Smallm (smaLL + LLm) is my attempt on making a tiny toy language model just for fun and educational purposes. It has about 28m parameters and is trained on 300k samples of the Cosmopedia dataset which have roughly 325m tokens. This is very small compared to LLMs' standards, which also explains why it is kinda goofy when you use it (lol), but you can definitely train this on a mid-range card for just half a day or 1-2 days, and it can still generate proper English and data that should be related to the user's prompt.
+Smallm (smaLL + LLm) is my attempt on making a tiny toy language model just for fun and educational purposes. It has about 17.9m parameters and is trained on roughly 3.25 billion tokens of the Cosmopedia dataset. This is very small compared to LLMs' standards, which also explains why it is kinda goofy when you use it (lol), but you can definitely train this on a mid-range card for just half a day or 1-2 days, and it can still generate proper English and data that should be related to the user's prompt.
 
 ## Setup
 
@@ -36,7 +36,7 @@ Head over to `./main.py` and change `training` to `True`, then run:
 python main.py
 ```
 
-The model will train for 10 epochs (estimated 18-20 hours on my Laptop RTX 5070), and after each epoch it will save the current model to `./chatbot.pth`.
+The model will train with 3.25b tokens with 10 325m-token segments (estimated 18-20 hours on my Laptop RTX 5070), and after each epoch it will save the current model to `./chatbot.pth`.
 
 To start from where you left off, just name your file `chatbot_continue.pth` to resume training.
 
@@ -46,25 +46,23 @@ Currently it uses:
 
 * Tokenizer: Tiktoken with GPT-2 encoding (50,257 vocab size)
 * Embedding: 256-dimensional token embeddings
-* Positional Encoding: Sinusoidal positional encoding
-* Linear input projection layer from embedding to transformer
-* Transformer: 3 encoder layers, 8 attention heads, 1024 block size, 256 d_model
+* Positional Encoding: 256-dimensional position embeddings
+* Transformer: 6 encoder layers, 8 attention heads, 1024 d_ffn, 256 d_model
 * Output: Linear layer to vocabulary
 
 and is trained with:
 
-* Dataset: Cosmopedia (~325M tokens)
+* Dataset: Cosmopedia (~3.25b tokens) with 50% overlapping
 * Context Window: 1024 tokens
 * Batch Size: 8 (effective batch size: 64 with gradient accumulation)
 * Optimizer: AdamW with mixed precision training
-* 10 epochs (about 18 hours on the laptop-version RTX 5070)
 
 and generates text with:
 
 * Sampling: Top-k sampling (k=50)
-* Temperature: 0.8 (configurable)
+* Temperature: 0.8
 * Context Window: 1024 tokens
-* Stopping: Natural EOS token or conversation breaks
+* Stopping: EOS token for fixed limit (10240 by default)
 * Simple repetition penalty
 
 ## Copyrights and License
