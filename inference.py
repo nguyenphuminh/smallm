@@ -27,5 +27,5 @@ if __name__ == "__main__":
         elif prompt == "/clear":
             print("\033c", end="")
         else:
-            chatbot.generate(f"Human: {prompt}\n\nAssistant:")
+            chatbot.generate(prompt)
             print("\033[0m")

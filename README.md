@@ -1,6 +1,6 @@
 # smallm
 
-Smallm (smaLL + LLm) is my attempt on making a tiny toy language model from scratch just for fun and educational purposes. It has about 20m parameters and is trained on roughly 10 billion tokens of the Fineweb dataset. This is very small compared to LLMs' standards, which also explains why it is goofy when you use it (lol), but you can definitely train this on a mid-range card for just half a day or 1-2 days, and it can still generate proper English and data that should be related to the user's prompt.
+Smallm (smaLL + LLm) is my attempt on making a tiny toy language model from scratch mostly for fun and educational purposes, but also to see how far can a tiny language model go. It has about 150m parameters and is trained on roughly 3 billion tokens of the Fineweb dataset. This is small compared to modern LLMs' standards, which also explains why it is goofy when you use it (lol), but you can definitely train this on a mid-range card for just 3-4 days, and it can still generate proper English and data that should be related to the user's prompt.
 
 ## Setup
 
@@ -37,40 +37,41 @@ To train the model from scratch, run:
 python train.py
 ```
 
-The model will train with 3.25b tokens with 10 325m-token segments (estimated 17 hours on my Laptop RTX 5070), and after each epoch it will save the current model to `./chatbot.pth`.
+The model will train with 3b+ tokens with 20 100m-token segments (estimated 48 hours on my Laptop RTX 5070), and after each epoch it will save the current model to `./chatbot.pth`.
 
 ## Architecture
 
 Currently it uses:
 
 * Tokenizer: Tiktoken with GPT-2 encoding (50,257 vocab size).
-* Embedding: 256-dimensional token embeddings.
-* Positional Encoding: 256-dimensional position embeddings.
-* Transformer: 8 decoder layers, 6 heads, 1024 d_ffn, 256 d_model.
-* Grouped Query Attention with 1 kv head and flash attention (sdpa).
-* PaLM-style parallel attention output.
-* RMSNorm rather than LayerNorm for normalization.
-* SwiGLU activation in the FFN layers.
-* Output: Weight-tied linear layer to vocabulary.
+* Embedding: 768-dimensional token embeddings.
+* Positional Encoding: 768-dimensional position embeddings with 1024-token context window.
+* Transformer: 12 decoder layers, 12 heads, 3072 d_ffn, 768 d_model.
+* Multi-Query Attention with flash attention support (sdpa).
+* Squared ReLU for activation.
+* RMSNorm without learnable params for normalization, used in transformer and before output.
+* Output: Linear layer to vocabulary (without weight-tying).
 
 and is trained with:
 
-* Dataset: Fineweb (~10b tokens) with no overlapping.
-* Context Window: 256 tokens.
-* Batch Size: 31 (effective batch size: 248 with gradient accumulation)
-* Optimizer: AdamW with mixed precision training
+* Dataset: Fineweb (~3b tokens) with no overlapping.
+* Context Window: 1024 tokens.
+* Batch Size: 8 (effective batch size: 512 with gradient accumulation).
+* Fused AdamW optimizer.
 * LinearLR for 2% warmup, CosineAnnealingLR for lr decay.
+* BF16 mixed precision training and other Blackwell-specific features.
+* Training with torch.compile on "max-autotune" mode.
 
 and generates text with:
 
-* Sampling: Top-k sampling (k=50)
-* Temperature: 0.7
-* Context Window: 256 tokens
-* Stopping: EOS token for fixed limit (10240 by default)
-* Simple repetition penalty
+* Sampling: Top-k sampling (k=50).
+* Temperature: 0.7.
+* Context Window: 1024 tokens.
+* Stopping: EOS token for fixed limit (10240 by default).
+* Simple repetition penalty with 64 latest tokens.
 
 ## Copyrights and License
 
 Copyrights © 2025 Nguyen Phu Minh.
 
-This project is licensed under the GPL 3.0 License.
+This project is licensed under the Apache 2.0 License.

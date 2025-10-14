@@ -2,8 +2,8 @@ from datasets import load_dataset
 
 def load_data(
     start=0,
-    end=14900000,
-    step=745000,
+    end=4470000,
+    step=223500,
     dataset_name="HuggingFaceFW/fineweb",
     subset="sample-10BT",
     split="train"

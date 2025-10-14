@@ -4,91 +4,54 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
-from torch.amp import autocast, GradScaler
+from torch.amp import autocast
+from torch.utils.checkpoint import checkpoint
 
-class RMSNorm(nn.Module):
-    # Fast RMSNorm
-    def __init__(self, dim, eps=1e-6):
-        super().__init__()
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim))
-    
-    def forward(self, x):
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps) * self.weight
+def rms_norm(x):
+    return F.rms_norm(x, (x.size(-1),))
 
-class GroupedQueryAttention(nn.Module):
-    # GQA with Flash Attention - maximum memory efficiency
-    def __init__(self, dim, num_heads, num_kv_heads):
+class MultiQueryAttention(nn.Module):
+    # MQA with Flash Attention - maximum memory efficiency
+    def __init__(self, dim, num_heads):
         super().__init__()
         assert dim % num_heads == 0
-        assert num_heads % num_kv_heads == 0
         
         self.num_heads = num_heads
-        self.num_kv_heads = num_kv_heads
-        self.num_groups = num_heads // num_kv_heads
         self.head_dim = dim // num_heads
 
         self.q_proj = nn.Linear(dim, dim, bias=False)
-        self.k_proj = nn.Linear(dim, num_kv_heads * self.head_dim, bias=False)
-        self.v_proj = nn.Linear(dim, num_kv_heads * self.head_dim, bias=False)
+        self.k_proj = nn.Linear(dim, self.head_dim, bias=False)
+        self.v_proj = nn.Linear(dim, self.head_dim, bias=False)
         self.out_proj = nn.Linear(dim, dim, bias=False)
     
     def forward(self, x):
         B, L, _ = x.shape
         
         q = self.q_proj(x).view(B, L, self.num_heads, self.head_dim).transpose(1, 2)
-        k = self.k_proj(x).view(B, L, self.num_kv_heads, self.head_dim).transpose(1, 2)
-        v = self.v_proj(x).view(B, L, self.num_kv_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(x).view(B, L, 1, self.head_dim).transpose(1, 2)
+        v = self.v_proj(x).view(B, L, 1, self.head_dim).transpose(1, 2)
         
         # Expand KV to match Q heads
-        k = k.unsqueeze(2).expand(B, self.num_kv_heads, self.num_groups, L, self.head_dim)
-        k = k.reshape(B, self.num_heads, L, self.head_dim)
-        v = v.unsqueeze(2).expand(B, self.num_kv_heads, self.num_groups, L, self.head_dim)
-        v = v.reshape(B, self.num_heads, L, self.head_dim)
+        k = k.expand(B, self.num_heads, L, self.head_dim)
+        v = v.expand(B, self.num_heads, L, self.head_dim)
         
         # Flash Attention
         out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         
         return self.out_proj(out.transpose(1, 2).reshape(B, L, -1))
 
-class SwiGLU(nn.Module):
-    # SwiGLU activation - better than GELU
-    def forward(self, x):
-        x, gate = x.chunk(2, dim=-1)
-        return F.silu(gate) * x
-
-class GLUFeedForward(nn.Module):
-    # FFN with SwiGLU - best quality
-    def __init__(self, dim, hidden_dim):
-        super().__init__()
-        self.w1 = nn.Linear(dim, hidden_dim * 2, bias=False)  # *2 for gating
-        self.w2 = nn.Linear(hidden_dim, dim, bias=False)
-        self.act = SwiGLU()
-    
-    def forward(self, x):
-        return self.w2(self.act(self.w1(x)))
-
 class OptimizedTransformerLayer(nn.Module):
-    """
-    Optimizations enabled:
-    - RMSNorm
-    - Flash Attention
-    - GQA
-    - SwiGLU
-    - PaLM-style output
-    """
-    
-    def __init__(self, dim, num_heads, num_kv_heads, dim_ff):
+    def __init__(self, dim, num_heads, dim_ff):
         super().__init__()
-        
-        self.norm = RMSNorm(dim)
-        self.attn = GroupedQueryAttention(dim, num_heads, num_kv_heads)
-        self.ffn = GLUFeedForward(dim, dim_ff)
+
+        self.attn = MultiQueryAttention(dim, num_heads)
+        self.ffn1 = nn.Linear(dim, dim_ff, bias=False)
+        self.ffn2 = nn.Linear(dim_ff, dim, bias=False)
     
     def forward(self, x):
-        # Reduce 1 norm from normal computation
-        x_norm = self.norm(x)
-        return x + self.attn(x_norm) + self.ffn(x_norm)
+        x = x + self.attn(rms_norm(x))
+        x = x + self.ffn2(F.relu(self.ffn1(rms_norm(x))))
+        return x
 
 class ChatBot(nn.Module):
     def __init__(self, options={}):
@@ -100,11 +63,10 @@ class ChatBot(nn.Module):
         self.eos_token_id = self.encoding.encode("<|endoftext|>", allowed_special={"<|endoftext|>"})[0]
         
         # Config
-        self.d_model = options.get("d_model", 256)
-        self.num_layers = options.get("num_layers", 8)
-        self.num_heads = options.get("num_heads", 4)
-        self.num_kv_heads = options.get("num_kv_heads", 1)
-        self.max_seq_len = options.get("max_seq_len", 256)
+        self.d_model = options.get("d_model", 768)
+        self.num_layers = options.get("num_layers", 12)
+        self.num_heads = options.get("num_heads", 12)
+        self.max_seq_len = options.get("max_seq_len", 1024)
         self.overlapping = options.get("overlapping", 1)
         
         # Layers
@@ -116,13 +78,9 @@ class ChatBot(nn.Module):
             OptimizedTransformerLayer(
                 self.d_model,
                 self.num_heads,
-                self.num_kv_heads,
                 self.d_model * 4
             ) for _ in range(self.num_layers)
         ])
-
-        # Final norm layer for stability
-        self.final_norm = RMSNorm(self.d_model)
 
         # One-hot output
         self.output = nn.Linear(self.d_model, self.vocab_size, bias=False)
@@ -131,16 +89,20 @@ class ChatBot(nn.Module):
         self.apply(self._init_weights)
 
         # Tie weights
-        self.output.weight = self.embedding.weight
+        # self.output.weight = self.embedding.weight
         
         # Only use CUDA
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA not available but required")
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.set_float32_matmul_precision("high")
         self.device = torch.device("cuda")
         self.to(self.device)
 
         # Position cache
-        self.pos_cache = {}
+        self.pos = torch.arange(0, self.max_seq_len, dtype=torch.long, device=self.device)
     
     def _init_weights(self, module):
         # Small weights for stable training
@@ -152,33 +114,25 @@ class ChatBot(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
     
     def forward(self, token_ids):        
-        batch_size, seq_len = token_ids.size()
-        
         # Token embedding and positional embedding
+        seq_len = token_ids.size(1)
         embedding = self.embedding(token_ids)
-
-        if seq_len not in self.pos_cache:
-            pos = torch.arange(0, seq_len, dtype=torch.int32, device=self.device)
-            self.pos_cache[seq_len] = pos
-        else:
-            pos = self.pos_cache[seq_len]
-
-        pos_emb = self.pos_embedding(pos)
+        pos_emb = self.pos_embedding(self.pos[:seq_len])
         embedding = embedding + pos_emb
         
         # Transformer forward pass
         for layer in self.transformer:
-            embedding = layer(embedding)
+            embedding = checkpoint(layer, embedding, use_reentrant=False)
 
         # Final norm
-        embedding = self.final_norm(embedding)
+        embedding = rms_norm(embedding)
 
         # Linear output projection
         output = self.output(embedding)
         
         return output
     
-    def train_model(self, data_loader, sequence_length=256, batch_size=31, gradient_accumulation_steps=8, lr=0.0002, T_max=158000):
+    def train_model(self, data_loader, sequence_length=1024, batch_size=8, gradient_accumulation_steps=64, lr=0.0002, T_max=5722):
         print(f"Training with batch_size={batch_size}, gradient_accumulation_steps={gradient_accumulation_steps}")
         print(f"Effective batch size: {batch_size * gradient_accumulation_steps}")
 
@@ -192,7 +146,6 @@ class ChatBot(nn.Module):
         cosine_scheduler = CosineAnnealingLR(optimizer, T_max=T_max-warmup_steps, eta_min=1e-5)
         scheduler = SequentialLR(optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[warmup_steps])
         criterion = nn.CrossEntropyLoss()
-        scaler = GradScaler(self.device.type)
 
         for segment_index, segment in enumerate(data_loader):
             # Encode segment to tokens
@@ -214,7 +167,7 @@ class ChatBot(nn.Module):
             total_loss = 0
             num_batches = 0
             
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
             
             for batch_start in range(0, len(sequences), batch_size):
                 batch_sequences = sequences[batch_start:batch_start + batch_size]
@@ -232,7 +185,7 @@ class ChatBot(nn.Module):
                 target_tokens = torch.tensor(batch_target, device=self.device) # [batch_size, seq_len-1]
                 
                 # Enable mixed precision
-                with autocast(device_type=self.device.type):
+                with autocast(device_type=self.device.type, dtype=torch.bfloat16):
                     output = self.forward(input_tokens)  # [batch_size, seq_len-1, vocab_size]
                     output = output.reshape(-1, self.vocab_size)  # [batch_size * seq_len-1, vocab_size]
                     target_tokens = target_tokens.reshape(-1)  # [batch_size * seq_len-1]
@@ -240,27 +193,23 @@ class ChatBot(nn.Module):
                     loss = loss / gradient_accumulation_steps
                 
                 # Scale loss and backward
-                scaler.scale(loss).backward()
+                loss.backward()
 
                 total_loss += loss.item() * gradient_accumulation_steps
                 num_batches += 1
                 
                 # Update weights every gradient_accumulation_steps
                 if num_batches % gradient_accumulation_steps == 0:
-                    scaler.unscale_(optimizer)  # Unscale before clipping
                     torch.nn.utils.clip_grad_norm_(self.parameters(), 1.0)
-                    scaler.step(optimizer)
-                    scaler.update()
-                    optimizer.zero_grad()
+                    optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
                     scheduler.step()
 
             # Final update if needed
             if num_batches % gradient_accumulation_steps != 0:
-                scaler.unscale_(optimizer)  # Unscale before clipping
                 torch.nn.utils.clip_grad_norm_(self.parameters(), 1.0)
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad()
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
                 scheduler.step()
 
             avg_loss = total_loss / num_batches if num_batches > 0 else 0
@@ -274,7 +223,7 @@ class ChatBot(nn.Module):
     def generate(
         self,
         prompt,
-        context_window=256,
+        context_window=1024,
         max_length=10240,
         repetition_penalty=1.1,
         repetition_penalty_range=64,
@@ -346,7 +295,6 @@ class ChatBot(nn.Module):
                     word_stack = []
                 
                 # Clear caches
-                self.pos_cache.clear()
                 torch.cuda.empty_cache()
         
     
@@ -356,7 +304,6 @@ class ChatBot(nn.Module):
             "d_model": self.d_model,
             "num_layers": self.num_layers,
             "num_heads": self.num_heads,
-            "num_kv_heads": self.num_kv_heads,
             "vocab_size": self.vocab_size,
             "max_seq_len": self.max_seq_len,
             "overlapping": self.overlapping,
