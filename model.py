@@ -1,16 +1,22 @@
+import math
 import tiktoken
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.optim as optim
+from torch.optim import AdamW
 from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
-from torch.amp import autocast
 from torch.utils.checkpoint import checkpoint
+from torch.amp import autocast
 from muon import Muon, get_muon_momentum
-import math
 
 def rms_norm(x):
     return F.rms_norm(x, (x.size(-1),))
+
+def apply_rotary_emb(x, cos, sin):
+    x1, x2 = torch.chunk(x, 2, dim=-1)
+    o1 = x1 * cos - x2 * sin
+    o2 = x2 * cos + x1 * sin
+    return torch.cat((o1, o2), dim=-1)
 
 class MultiQueryAttention(nn.Module):
     # MQA with Flash Attention - maximum memory efficiency
@@ -26,12 +32,16 @@ class MultiQueryAttention(nn.Module):
         self.v_proj = nn.Linear(dim, self.head_dim, bias=False)
         self.out_proj = nn.Linear(dim, dim, bias=False)
     
-    def forward(self, x):
+    def forward(self, x, cos, sin):
         B, L, _ = x.shape
         
         q = self.q_proj(x).view(B, L, self.num_heads, self.head_dim).transpose(1, 2)
         k = self.k_proj(x).view(B, L, 1, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(B, L, 1, self.head_dim).transpose(1, 2)
+
+        # RoPE
+        q = apply_rotary_emb(q, cos, sin)
+        k = apply_rotary_emb(k, cos, sin)
 
         # QK norm
         q = rms_norm(q)
@@ -54,8 +64,8 @@ class OptimizedTransformerLayer(nn.Module):
         self.ffn1 = nn.Linear(dim, dim_ff, bias=False)
         self.ffn2 = nn.Linear(dim_ff, dim, bias=False)
     
-    def forward(self, x):
-        x = x + self.attn(rms_norm(x))
+    def forward(self, x, cos, sin):
+        x = x + self.attn(rms_norm(x), cos, sin)
         x = x + self.ffn2(F.relu(self.ffn1(rms_norm(x))).square())
         return x
 
@@ -72,12 +82,11 @@ class ChatBot(nn.Module):
         self.d_model = options.get("d_model", 768)
         self.num_layers = options.get("num_layers", 12)
         self.num_heads = options.get("num_heads", 12)
-        self.max_seq_len = options.get("max_seq_len", 1024)
+        self.rotary_seq_len = options.get("rotary_seq_len", 1024)
         self.overlapping = options.get("overlapping", 1)
         
-        # Layers
-        self.embedding = nn.Embedding(self.vocab_size, self.d_model)
-        self.pos_embedding = nn.Embedding(self.max_seq_len, self.d_model)
+        # Embedding
+        self.embedding = nn.Embedding(self.vocab_size, self.d_model, dtype=torch.bfloat16)
 
         # Transformer decoder layers
         self.transformer = nn.ModuleList([
@@ -99,6 +108,9 @@ class ChatBot(nn.Module):
             torch.nn.init.zeros_(layer.ffn2.weight)
         torch.nn.init.zeros_(self.output.weight)
 
+        # Precompute cos and sin
+        self.cos, self.sin = self._precompute_rotary_embeddings(self.rotary_seq_len, self.d_model // self.num_heads)
+
         # Tie weights
         # self.output.weight = self.embedding.weight
         
@@ -111,9 +123,6 @@ class ChatBot(nn.Module):
         torch.set_float32_matmul_precision("high")
         self.device = torch.device("cuda")
         self.to(self.device)
-
-        # Position cache
-        self.pos = torch.arange(0, self.max_seq_len, dtype=torch.long, device=self.device)
     
     def _init_weights(self, module):
         # Yoinked from nanochat basically
@@ -121,25 +130,45 @@ class ChatBot(nn.Module):
             fan_out = module.weight.size(0)
             fan_in = module.weight.size(1)
             std = 1.0 / math.sqrt(fan_in) * min(1.0, math.sqrt(fan_out / fan_in))
+            
             torch.nn.init.normal_(module.weight, mean=0.0, std=std)
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=1.0)
     
-    def forward(self, token_ids):        
-        # Token embedding and positional embedding
-        seq_len = token_ids.size(1)
+    def _precompute_rotary_embeddings(self, seq_len, head_dim, base=10000):
+        # Stride the channels
+        channel_range = torch.arange(0, head_dim, 2, dtype=torch.float32, device=self.device)
+        inv_freq = 1.0 / (base ** (channel_range / head_dim))
+
+        # Stride the time steps
+        t = torch.arange(seq_len, dtype=torch.float32, device=self.device)
+
+        # Calculate the rotation frequencies at each (time, channel) pair
+        freqs = torch.outer(t, inv_freq)
+        cos, sin = freqs.cos(), freqs.sin()
+
+        # After we have used float32 for more accurate cos and sin, we keep bfloat16
+        cos, sin = cos.bfloat16(), sin.bfloat16()
+        cos, sin = cos[None, :, None, :], sin[None, :, None, :]
+        return cos, sin
+    
+    def forward(self, token_ids):
+        _, seq_len = token_ids.shape
+
+        # Token embedding
         embedding = self.embedding(token_ids)
-        pos_emb = self.pos_embedding(self.pos[:seq_len])
-        embedding = embedding + pos_emb
 
         # Embedding norm
         embedding = rms_norm(embedding)
         
         # Transformer forward pass
+        cos = self.cos[:, :seq_len, :, :]
+        sin = self.sin[:, :seq_len, :, :]
+
         for layer in self.transformer:
-            embedding = checkpoint(layer, embedding, use_reentrant=False)
+            embedding = checkpoint(layer, embedding, cos, sin, use_reentrant=False)
 
         # Final norm
         embedding = rms_norm(embedding)
@@ -158,14 +187,14 @@ class ChatBot(nn.Module):
         print(f"Effective batch size: {batch_size * gradient_accumulation_steps}")
 
         # Cap context window
-        sequence_length = min(sequence_length, self.max_seq_len)
+        sequence_length = min(sequence_length, self.rotary_seq_len)
         
         # 2% warmup
         warmup_steps = int(0.02 * T_max)
         
         # AdamW for embedding/linear weights
-        linear_params = [self.embedding.weight, self.pos_embedding.weight, self.output.weight]
-        adamw_opt = optim.AdamW(linear_params, lr=0.0002, fused=True)
+        linear_params = [self.embedding.weight, self.output.weight]
+        adamw_opt = AdamW(linear_params, lr=0.0002, fused=True)
         # Schedulers for AdamW
         adamw_warmup_scheduler = LinearLR(adamw_opt, start_factor=0.01, total_iters=warmup_steps)
         adamw_cosine_scheduler = CosineAnnealingLR(adamw_opt, T_max=T_max-warmup_steps, eta_min=1e-5)
@@ -180,6 +209,7 @@ class ChatBot(nn.Module):
         muon_scheduler = SequentialLR(muon_opt, schedulers=[muon_warmup_scheduler, muon_cosine_scheduler], milestones=[warmup_steps])
         criterion = nn.CrossEntropyLoss()
 
+        # Track optimizer step for Muon momentum update
         optimizer_step = 0
 
         for segment_index, segment in enumerate(data_loader):
@@ -206,19 +236,9 @@ class ChatBot(nn.Module):
             muon_opt.zero_grad(set_to_none=True)
             
             for batch_start in range(0, len(sequences), batch_size):
-                batch_sequences = sequences[batch_start:batch_start + batch_size]
-                
-                # Convert to tensors
-                batch_input = []
-                batch_target = []
-                
-                for seq in batch_sequences:
-                    batch_input.append(seq[:-1])
-                    batch_target.append(seq[1:])
-                
-                # Stack into tensors [batch_size, seq_len]
-                input_tokens = torch.tensor(batch_input, device=self.device)  # [batch_size, seq_len-1]
-                target_tokens = torch.tensor(batch_target, device=self.device) # [batch_size, seq_len-1]
+                batch_sequences = torch.tensor(sequences[batch_start:batch_start + batch_size], device=self.device)
+                input_tokens = batch_sequences[:, :-1]
+                target_tokens = batch_sequences[:, 1:]
                 
                 # Enable mixed precision
                 with autocast(device_type=self.device.type, dtype=torch.bfloat16):
@@ -227,20 +247,21 @@ class ChatBot(nn.Module):
                     target_tokens = target_tokens.reshape(-1)  # [batch_size * seq_len-1]
                     loss = criterion(output, target_tokens)
                     loss = loss / gradient_accumulation_steps
-                
-                # Scale loss and backward
-                loss.backward()
 
+                # Propagate grad
+                loss.backward()
                 total_loss += loss.item() * gradient_accumulation_steps
                 num_batches += 1
                 
                 # Update weights every gradient_accumulation_steps
                 if num_batches % gradient_accumulation_steps == 0:
+                    # AdamW step
                     torch.nn.utils.clip_grad_norm_(self.parameters(), 1.0)
                     adamw_opt.step()
                     adamw_opt.zero_grad(set_to_none=True)
                     adamw_scheduler.step()
 
+                    # Muon step
                     for group in muon_opt.param_groups:
                         group["momentum"] = get_muon_momentum(optimizer_step)
                     muon_opt.step()
@@ -249,14 +270,15 @@ class ChatBot(nn.Module):
 
                     optimizer_step += 1
 
-
             # Final update if needed
             if num_batches % gradient_accumulation_steps != 0:
+                # AdamW step
                 torch.nn.utils.clip_grad_norm_(self.parameters(), 1.0)
                 adamw_opt.step()
                 adamw_opt.zero_grad(set_to_none=True)
                 adamw_scheduler.step()
 
+                # Muon step
                 for group in muon_opt.param_groups:
                     group["momentum"] = get_muon_momentum(optimizer_step)
                 muon_opt.step()
@@ -265,6 +287,7 @@ class ChatBot(nn.Module):
 
                 optimizer_step += 1
 
+            # Get log info
             avg_loss = total_loss / num_batches if num_batches > 0 else 0
             adamw_current_lr = adamw_opt.param_groups[0]["lr"]
             muon_current_lr = muon_opt.param_groups[0]["lr"]
@@ -291,13 +314,12 @@ class ChatBot(nn.Module):
         
         with torch.no_grad():
             current_tokens = memory + self.text_to_tokens(prompt)
-            max_context = min(context_window, self.max_seq_len)
 
             # Stack in case a char is made up of multiple tokens
             word_stack = []
 
             for i in range(max_length):
-                current_tokens = current_tokens[-max_context:] if len(current_tokens) > max_context else current_tokens
+                current_tokens = current_tokens[-context_window:] if len(current_tokens) > context_window else current_tokens
                 input_tensor = torch.tensor(current_tokens, device=self.device).unsqueeze(0)
 
                 # Forward pass
@@ -347,11 +369,9 @@ class ChatBot(nn.Module):
                 if "\ufffd" not in decoded_word:
                     print(decoded_word, end="")
                     word_stack = []
-                
-                # Clear caches
-                torch.cuda.empty_cache()
         
-    
+        return current_tokens[-context_window:]
+
     def save(self, path="./chatbot.pth"):
         torch.save({
             "model_state_dict": self.state_dict(),
@@ -359,7 +379,7 @@ class ChatBot(nn.Module):
             "num_layers": self.num_layers,
             "num_heads": self.num_heads,
             "vocab_size": self.vocab_size,
-            "max_seq_len": self.max_seq_len,
+            "rotary_seq_len": self.rotary_seq_len,
             "overlapping": self.overlapping,
             "eos_token_id": self.eos_token_id
         }, path)

@@ -37,15 +37,15 @@ To train the model from scratch, run:
 python train.py
 ```
 
-The model will train with 3b+ tokens with 20 100m-token segments (estimated 48 hours on my Laptop RTX 5070), and after each epoch it will save the current model to `./chatbot.pth`.
+The model will train with 3b+ tokens with 20 150m-token segments (estimated 48 hours on my Laptop RTX 5070), and after each epoch it will save the current model to `./chatbot.pth`.
 
 ## Architecture
 
 Currently it uses:
 
 * Tokenizer: Tiktoken with GPT-2 encoding (50,257 vocab size).
-* Embedding: 768-dimensional token embeddings.
-* Positional Encoding: 768-dimensional position embeddings with 1024-token context window.
+* Embedding: 768-dimensional token embedding.
+* Rotary positional embedding.
 * Transformer: 12 decoder layers, 12 heads, 3072 d_ffn, 768 d_model.
 * Multi-Query Attention with flash attention support (sdpa).
 * Squared ReLU for activation.
