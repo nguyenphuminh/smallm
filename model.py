@@ -7,6 +7,7 @@ from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
 from torch.amp import autocast
 from torch.utils.checkpoint import checkpoint
 from muon import Muon, get_muon_momentum
+import math
 
 def rms_norm(x):
     return F.rms_norm(x, (x.size(-1),))
@@ -31,6 +32,10 @@ class MultiQueryAttention(nn.Module):
         q = self.q_proj(x).view(B, L, self.num_heads, self.head_dim).transpose(1, 2)
         k = self.k_proj(x).view(B, L, 1, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(B, L, 1, self.head_dim).transpose(1, 2)
+
+        # QK norm
+        q = rms_norm(q)
+        k = rms_norm(k)
         
         # Expand KV to match Q heads
         k = k.expand(B, self.num_heads, L, self.head_dim)
@@ -88,6 +93,11 @@ class ChatBot(nn.Module):
 
         # Apply weight init
         self.apply(self._init_weights)
+        # Zero out specific output projections for residual paths
+        for layer in self.transformer:
+            torch.nn.init.zeros_(layer.attn.out_proj.weight)
+            torch.nn.init.zeros_(layer.ffn2.weight)
+        torch.nn.init.zeros_(self.output.weight)
 
         # Tie weights
         # self.output.weight = self.embedding.weight
@@ -106,13 +116,16 @@ class ChatBot(nn.Module):
         self.pos = torch.arange(0, self.max_seq_len, dtype=torch.long, device=self.device)
     
     def _init_weights(self, module):
-        # Small weights for stable training
+        # Yoinked from nanochat basically
         if isinstance(module, nn.Linear):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            fan_out = module.weight.size(0)
+            fan_in = module.weight.size(1)
+            std = 1.0 / math.sqrt(fan_in) * min(1.0, math.sqrt(fan_out / fan_in))
+            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            torch.nn.init.normal_(module.weight, mean=0.0, std=1.0)
     
     def forward(self, token_ids):        
         # Token embedding and positional embedding
@@ -120,6 +133,9 @@ class ChatBot(nn.Module):
         embedding = self.embedding(token_ids)
         pos_emb = self.pos_embedding(self.pos[:seq_len])
         embedding = embedding + pos_emb
+
+        # Embedding norm
+        embedding = rms_norm(embedding)
         
         # Transformer forward pass
         for layer in self.transformer:
@@ -130,6 +146,10 @@ class ChatBot(nn.Module):
 
         # Linear output projection
         output = self.output(embedding)
+
+        # Logits softcapping
+        softcap = 15.0
+        output = softcap * torch.tanh(output / softcap)
         
         return output
     
