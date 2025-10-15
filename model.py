@@ -6,6 +6,7 @@ import torch.optim as optim
 from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
 from torch.amp import autocast
 from torch.utils.checkpoint import checkpoint
+from muon import Muon, get_muon_momentum
 
 def rms_norm(x):
     return F.rms_norm(x, (x.size(-1),))
@@ -50,7 +51,7 @@ class OptimizedTransformerLayer(nn.Module):
     
     def forward(self, x):
         x = x + self.attn(rms_norm(x))
-        x = x + self.ffn2(F.relu(self.ffn1(rms_norm(x))))
+        x = x + self.ffn2(F.relu(self.ffn1(rms_norm(x))).square())
         return x
 
 class ChatBot(nn.Module):
@@ -132,20 +133,34 @@ class ChatBot(nn.Module):
         
         return output
     
-    def train_model(self, data_loader, sequence_length=1024, batch_size=8, gradient_accumulation_steps=64, lr=0.0002, T_max=5722):
+    def train_model(self, data_loader, sequence_length=1024, batch_size=8, gradient_accumulation_steps=64, T_max=5722):
         print(f"Training with batch_size={batch_size}, gradient_accumulation_steps={gradient_accumulation_steps}")
         print(f"Effective batch size: {batch_size * gradient_accumulation_steps}")
 
         # Cap context window
         sequence_length = min(sequence_length, self.max_seq_len)
         
-        # Init training utils
-        optimizer = optim.AdamW(self.parameters(), lr=lr, fused=True)
-        warmup_steps = int(0.02 * T_max)  # 2% warmup
-        warmup_scheduler = LinearLR(optimizer, start_factor=0.01, total_iters=warmup_steps)
-        cosine_scheduler = CosineAnnealingLR(optimizer, T_max=T_max-warmup_steps, eta_min=1e-5)
-        scheduler = SequentialLR(optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[warmup_steps])
+        # 2% warmup
+        warmup_steps = int(0.02 * T_max)
+        
+        # AdamW for embedding/linear weights
+        linear_params = [self.embedding.weight, self.pos_embedding.weight, self.output.weight]
+        adamw_opt = optim.AdamW(linear_params, lr=0.0002, fused=True)
+        # Schedulers for AdamW
+        adamw_warmup_scheduler = LinearLR(adamw_opt, start_factor=0.01, total_iters=warmup_steps)
+        adamw_cosine_scheduler = CosineAnnealingLR(adamw_opt, T_max=T_max-warmup_steps, eta_min=1e-5)
+        adamw_scheduler = SequentialLR(adamw_opt, schedulers=[adamw_warmup_scheduler, adamw_cosine_scheduler], milestones=[warmup_steps])
+        
+        # Muon for transformer params
+        transformer_params = [p for n, p in self.named_parameters() if "embedding" not in n and "output" not in n]
+        muon_opt = Muon(transformer_params, lr=0.02, momentum=0.95)
+        # Schedulers for Muon
+        muon_warmup_scheduler = LinearLR(muon_opt, start_factor=0.01, total_iters=warmup_steps)
+        muon_cosine_scheduler = CosineAnnealingLR(muon_opt, T_max=T_max-warmup_steps, eta_min=1e-5)
+        muon_scheduler = SequentialLR(muon_opt, schedulers=[muon_warmup_scheduler, muon_cosine_scheduler], milestones=[warmup_steps])
         criterion = nn.CrossEntropyLoss()
+
+        optimizer_step = 0
 
         for segment_index, segment in enumerate(data_loader):
             # Encode segment to tokens
@@ -167,7 +182,8 @@ class ChatBot(nn.Module):
             total_loss = 0
             num_batches = 0
             
-            optimizer.zero_grad(set_to_none=True)
+            adamw_opt.zero_grad(set_to_none=True)
+            muon_opt.zero_grad(set_to_none=True)
             
             for batch_start in range(0, len(sequences), batch_size):
                 batch_sequences = sequences[batch_start:batch_start + batch_size]
@@ -201,22 +217,40 @@ class ChatBot(nn.Module):
                 # Update weights every gradient_accumulation_steps
                 if num_batches % gradient_accumulation_steps == 0:
                     torch.nn.utils.clip_grad_norm_(self.parameters(), 1.0)
-                    optimizer.step()
-                    optimizer.zero_grad(set_to_none=True)
-                    scheduler.step()
+                    adamw_opt.step()
+                    adamw_opt.zero_grad(set_to_none=True)
+                    adamw_scheduler.step()
+
+                    for group in muon_opt.param_groups:
+                        group["momentum"] = get_muon_momentum(optimizer_step)
+                    muon_opt.step()
+                    muon_opt.zero_grad(set_to_none=True)
+                    muon_scheduler.step()
+
+                    optimizer_step += 1
+
 
             # Final update if needed
             if num_batches % gradient_accumulation_steps != 0:
                 torch.nn.utils.clip_grad_norm_(self.parameters(), 1.0)
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
-                scheduler.step()
+                adamw_opt.step()
+                adamw_opt.zero_grad(set_to_none=True)
+                adamw_scheduler.step()
+
+                for group in muon_opt.param_groups:
+                    group["momentum"] = get_muon_momentum(optimizer_step)
+                muon_opt.step()
+                muon_opt.zero_grad(set_to_none=True)
+                muon_scheduler.step()
+
+                optimizer_step += 1
 
             avg_loss = total_loss / num_batches if num_batches > 0 else 0
-            current_lr = optimizer.param_groups[0]["lr"]
+            adamw_current_lr = adamw_opt.param_groups[0]["lr"]
+            muon_current_lr = muon_opt.param_groups[0]["lr"]
 
             # Log and save
-            print(f"Segment {segment_index + 1}: Loss: {avg_loss:.4f}, LR: {current_lr:.6f}, Batches: {num_batches}")
+            print(f"Segment {segment_index + 1}: Loss: {avg_loss:.4f}, AdamW LR: {adamw_current_lr:.6f}, Muon LR: {muon_current_lr:.6f}, Batches: {num_batches}")
             self.save()
             print(f"Segment {segment_index + 1}: Saved to chatbot.pth")
 
