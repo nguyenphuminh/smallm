@@ -1,6 +1,6 @@
 # PlanckGPT
 
-PlanckGPT is my attempt on making a tiny language model (planck length refence :D) from scratch mostly for fun and educational purposes, but also to see how far a consumer-level computer can go. It has about 150m parameters and is trained on roughly 3 billion tokens of the Fineweb dataset. This is small compared to modern LLMs' standards, which also explains why it is goofy when you use it (lol), but you can definitely train this on a mid-range card for just 3-4 days, and it can still generate proper English and data that should be related to the user's prompt.
+PlanckGPT is my attempt on making a tiny language model (planck length refence :D) from scratch mostly for fun and educational purposes, but also to see how far a consumer-level computer can go. It has about 110m parameters and is trained on roughly 3 billion tokens of the Fineweb dataset. This is small compared to modern LLMs' standards, which also explains why it is goofy when you use it (lol), but you can definitely train this on a mid-range card for just 3-4 days, and it can still generate proper English and data that should be related to the user's prompt.
 
 ## Setup
 
@@ -15,7 +15,7 @@ source venv/scripts/activate
 
 # Install packages (once)
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
-pip install tiktoken datasets
+pip install tiktoken datasets bitsandbytes
 ```
 
 Of course, you should already install compatible CUDA and Python versions, I currently use Python 3.13 and CUDA 13 (which is compatible with CUDA 12.8 mentioned above).
@@ -50,7 +50,7 @@ Currently it uses:
 * Multi-Query Attention with flash attention support (sdpa).
 * Squared ReLU for activation.
 * RMSNorm without learnable params for normalization, used in transformer and before output.
-* Output: Linear layer to vocabulary (without weight-tying).
+* Output: Linear layer to vocabulary (weight-tied).
 
 and is trained with:
 

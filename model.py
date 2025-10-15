@@ -3,11 +3,11 @@ import tiktoken
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.optim import AdamW
 from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
 from torch.utils.checkpoint import checkpoint
 from torch.amp import autocast
 from muon import Muon, get_muon_momentum
+import bitsandbytes as bnb
 
 def rms_norm(x):
     return F.rms_norm(x, (x.size(-1),))
@@ -108,11 +108,8 @@ class ChatBot(nn.Module):
             torch.nn.init.zeros_(layer.ffn2.weight)
         torch.nn.init.zeros_(self.output.weight)
 
-        # Precompute cos and sin
-        self.cos, self.sin = self._precompute_rotary_embeddings(self.rotary_seq_len, self.d_model // self.num_heads)
-
         # Tie weights
-        # self.output.weight = self.embedding.weight
+        self.output.weight = self.embedding.weight
         
         # Only use CUDA
         if not torch.cuda.is_available():
@@ -123,6 +120,9 @@ class ChatBot(nn.Module):
         torch.set_float32_matmul_precision("high")
         self.device = torch.device("cuda")
         self.to(self.device)
+
+        # Precompute cos and sin
+        self.cos, self.sin = self._precompute_rotary_embeddings(self.rotary_seq_len, self.d_model // self.num_heads)
     
     def _init_weights(self, module):
         # Yoinked from nanochat basically
@@ -151,7 +151,7 @@ class ChatBot(nn.Module):
 
         # After we have used float32 for more accurate cos and sin, we keep bfloat16
         cos, sin = cos.bfloat16(), sin.bfloat16()
-        cos, sin = cos[None, :, None, :], sin[None, :, None, :]
+        cos, sin = cos[None, None, :, :], sin[None, None, :, :]
         return cos, sin
     
     def forward(self, token_ids):
@@ -164,8 +164,8 @@ class ChatBot(nn.Module):
         embedding = rms_norm(embedding)
         
         # Transformer forward pass
-        cos = self.cos[:, :seq_len, :, :]
-        sin = self.sin[:, :seq_len, :, :]
+        cos = self.cos[:, :, :seq_len, :]
+        sin = self.sin[:, :, :seq_len, :]
 
         for layer in self.transformer:
             embedding = checkpoint(layer, embedding, cos, sin, use_reentrant=False)
@@ -182,7 +182,7 @@ class ChatBot(nn.Module):
         
         return output
     
-    def train_model(self, data_loader, sequence_length=1024, batch_size=8, gradient_accumulation_steps=64, T_max=5722):
+    def train_model(self, data_loader, sequence_length=1024, batch_size=5, gradient_accumulation_steps=102, T_max=5722):
         print(f"Training with batch_size={batch_size}, gradient_accumulation_steps={gradient_accumulation_steps}")
         print(f"Effective batch size: {batch_size * gradient_accumulation_steps}")
 
@@ -194,7 +194,7 @@ class ChatBot(nn.Module):
         
         # AdamW for embedding/linear weights
         linear_params = [self.embedding.weight, self.output.weight]
-        adamw_opt = AdamW(linear_params, lr=0.0002, fused=True)
+        adamw_opt = bnb.optim.AdamW8bit(linear_params, lr=0.0002)
         # Schedulers for AdamW
         adamw_warmup_scheduler = LinearLR(adamw_opt, start_factor=0.01, total_iters=warmup_steps)
         adamw_cosine_scheduler = CosineAnnealingLR(adamw_opt, T_max=T_max-warmup_steps, eta_min=1e-5)
