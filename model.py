@@ -109,7 +109,7 @@ class ChatBot(nn.Module):
         torch.nn.init.zeros_(self.output.weight)
 
         # Tie weights
-        self.output.weight = self.embedding.weight
+        # self.output.weight = self.embedding.weight
         
         # Only use CUDA
         if not torch.cuda.is_available():
@@ -117,7 +117,6 @@ class ChatBot(nn.Module):
         torch.backends.cudnn.benchmark = True
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
-        torch.set_float32_matmul_precision("high")
         self.device = torch.device("cuda")
         self.to(self.device)
 
@@ -167,8 +166,11 @@ class ChatBot(nn.Module):
         cos = self.cos[:, :, :seq_len, :]
         sin = self.sin[:, :, :seq_len, :]
 
-        for layer in self.transformer:
-            embedding = checkpoint(layer, embedding, cos, sin, use_reentrant=False)
+        for i, layer in enumerate(self.transformer):
+            if i % 3 != 2:
+                embedding = checkpoint(layer, embedding, cos, sin, use_reentrant=False)
+            else:
+                embedding = layer(embedding, cos, sin)
 
         # Final norm
         embedding = rms_norm(embedding)

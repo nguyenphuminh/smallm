@@ -37,7 +37,7 @@ To train the model from scratch, run:
 python train.py
 ```
 
-The model will train with 3b+ tokens with 20 150m-token segments (estimated 48 hours on my Laptop RTX 5070), and after each epoch it will save the current model to `./chatbot.pth`.
+The model will train with 3b+ tokens with 20 150m-token segments (estimated 60 hours on my Laptop RTX 5070), and after each epoch it will save the current model to `./chatbot.pth`.
 
 ## Architecture
 
@@ -50,17 +50,18 @@ Currently it uses:
 * Multi-Query Attention with flash attention support (sdpa).
 * Squared ReLU for activation.
 * RMSNorm without learnable params for normalization, used in transformer and before output.
-* Output: Linear layer to vocabulary (weight-tied).
+* Output: Linear layer to vocabulary.
 
 and is trained with:
 
 * Dataset: Fineweb (~3b tokens) with no overlapping.
 * Context Window: 1024 tokens.
 * Batch Size: 8 (effective batch size: 512 with gradient accumulation).
-* Muon optimizer for transformer weights, fused AdamW optimizer for embedding and linear layers.
+* Muon optimizer for transformer weights, 8-bit AdamW optimizer for embedding and linear layers.
 * LinearLR for 2% warmup, CosineAnnealingLR for lr decay.
 * BF16 mixed precision training and other Blackwell-specific features.
 * Training with torch.compile on "max-autotune" mode.
+* Gradient checkpointing in 2/3 of the transformer layers.
 
 and generates text with:
 
@@ -69,6 +70,8 @@ and generates text with:
 * Context Window: 1024 tokens.
 * Stopping: EOS token for fixed limit (10240 by default).
 * Simple repetition penalty with 64 latest tokens.
+
+The current configuration is designed to squeeze out the best possible performance out of an 8gb 5070, you can change the configs to match your card.
 
 ## Copyrights and License
 
