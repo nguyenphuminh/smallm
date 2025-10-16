@@ -117,6 +117,7 @@ class ChatBot(nn.Module):
         torch.backends.cudnn.benchmark = True
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
+        torch.set_float32_matmul_precision("high")
         self.device = torch.device("cuda")
         self.to(self.device)
 

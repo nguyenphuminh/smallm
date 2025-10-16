@@ -14,11 +14,11 @@ source venv/scripts/activate
 # or "./venv/scripts/activate" if you are on windows
 
 # Install packages (once)
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu129
 pip install tiktoken datasets bitsandbytes
 ```
 
-Of course, you should already install compatible CUDA and Python versions, I currently use Python 3.13 and CUDA 13 (which is compatible with CUDA 12.8 mentioned above).
+Of course, you should already install compatible CUDA and Python versions, I currently use Python 3.13 and CUDA 13 (which is compatible with CUDA 12.9 mentioned above).
 
 ## Running PlanckGPT
 
